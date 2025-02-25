@@ -6,6 +6,13 @@ __pycache__/
 # C extensions
 *.so
 
+# height files
+*.HGT
+*.hgt
+*.DAT
+*.TIF
+*.tif
+*.xml
 # Distribution / packaging
 .Python
 build/
@@ -127,3 +134,4 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+media1/

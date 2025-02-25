@@ -6,6 +6,7 @@ create ardupilot terrain database files
 import math, struct, os
 import time, struct
 import fastcrc
+from tqdm import tqdm
 
 crc16 = fastcrc.crc16.xmodem
 
@@ -49,6 +50,16 @@ def longitude_scale(lat):
     '''get longitude scale factor'''
     scale = to_float32(math.cos(to_float32(math.radians(lat))))
     return max(scale, 0.01)
+
+import numpy as np
+
+def read_hgt_file(hgt_file):
+    ''' Read an SRTM .HGT file and return elevation data as a numpy array '''
+    size = 3601  # SRTM1 resolution (30m)
+    with open(hgt_file, 'rb') as f:
+        data = np.fromfile(f, dtype='>i2')  # Big-endian 16-bit integers
+        data = data.reshape((size, size))  # Reshape to 3601x3601 grid
+    return data
 
 def diff_longitude_E7(lon1, lon2):
     '''get longitude difference, handling wrap'''
@@ -213,6 +224,7 @@ class DataFile(object):
 
     def finalise(self):
         '''finalise file after writing'''
+        print("Finalising %s" % self.name)
         self.fh.close()
         #and rename
         os.rename(self.tmpname, self.name)
@@ -267,8 +279,8 @@ class DataFile(object):
         if crc2 != crc:
             return False
         return True
-
-def create_degree(downloader, lat, lon, folder, grid_spacing, format):
+        
+def create_degree(downloader, lat, lon, folder, grid_spacing, format, use_hgt=False):
     '''create data file for one degree lat/lon'''
     lat_int = int(math.floor(lat))
     lon_int = int(math.floor((lon)))
@@ -276,51 +288,81 @@ def create_degree(downloader, lat, lon, folder, grid_spacing, format):
     tiles = {}
 
     dfile = DataFile(lat_int, lon_int, folder)
-
     blocknum = -1
+
+    # ✅ Load .HGT file **once** instead of per grid cell
+    elevation_data = None
+    if use_hgt:
+        hgt_filename = f"N{abs(lat_int):02d}W{abs(lon_int):03d}.HGT"
+        hgt_path = os.path.join(folder, hgt_filename)
+        if not os.path.exists(hgt_path):
+            print(f"ERROR: HGT file not found: {hgt_path}")
+            return False
+        elevation_data = read_hgt_file(hgt_path)  # ✅ Read file once
 
     while True:
         blocknum += 1
         (lat_e7, lon_e7) = pos_from_file_offset(lat_int, lon_int, blocknum * IO_BLOCK_SIZE, grid_spacing, format)
-        if lat_e7*1.0e-7 - lat_int >= 1.0:
-            break
+        print("Creating block %u %u" % (lat_e7, lon_e7))
+
+        if lat_e7 * 1.0e-7 - lat_int >= 1.0:
+            break  # ✅ Stop when out of bounds
+
         lat = lat_e7 * 1.0e-7
         lon = lon_e7 * 1.0e-7
         grid = GridBlock(lat_int, lon_int, lat, lon, grid_spacing, format)
-        if grid.blocknum() != blocknum:
+        if grid.blocknum() != blocknum or dfile.check_filled(grid, grid_spacing, format):
             continue
-        if dfile.check_filled(grid, grid_spacing, format):
-            continue
+
         for gx in range(TERRAIN_GRID_BLOCK_SIZE_X):
             for gy in range(TERRAIN_GRID_BLOCK_SIZE_Y):
-                lat_e7, lon_e7 = add_offset(lat*1.0e7, lon*1.0e7, gx*grid_spacing, gy*grid_spacing, format)
-                lat2_int = int(math.floor(lat_e7*1.0e-7))
-                lon2_int = int(math.floor(lon_e7*1.0e-7))
+                lat_e7, lon_e7 = add_offset(lat * 1.0e7, lon * 1.0e7, gx * grid_spacing, gy * grid_spacing, format)
+                lat2_int = int(math.floor(lat_e7 * 1.0e-7))
+                lon2_int = int(math.floor(lon_e7 * 1.0e-7))
                 tile_idx = (lat2_int, lon2_int)
-                while not tile_idx in tiles:
-                    tile = downloader.getTile(lat2_int, lon2_int)
-                    waited = False
-                    if (tile == 0 and downloader.offline == 1) or (isinstance(tile, srtm.SRTMOceanTile) and downloader.offline == 1):
-                        #skip tile
-                        dfile.remove()
-                        return False
-                    elif tile == 0:
-                        print("waiting on download of %d,%d" % (lat2_int, lon2_int))
-                        time.sleep(0.3)
-                        waited = True
-                        continue
-                    if waited:
+
+                if not use_hgt:
+                    while tile_idx not in tiles:
+                        tile = downloader.getTile(lat2_int, lon2_int)
+                        if (tile == 0 and downloader.offline == 1) or isinstance(tile, srtm.SRTMOceanTile):
+                            dfile.remove()
+                            return False  # Exit if tile download fails
+                        elif tile == 0:
+                            print("waiting on download of %d,%d" % (lat2_int, lon2_int))
+                            time.sleep(0.3)
+                            continue
                         print("downloaded %d,%d" % (lat2_int, lon2_int))
-                    print("Creating for %d %d with spacing %u" % (lat_int, lon_int, grid_spacing))
-                    tiles[tile_idx] = tile
-                if isinstance(tile, srtm.SRTMOceanTile):
-                    # if it's a blank ocean tile, there's a quicker way to generate the tile
-                    grid.fill(gx, gy, 0)
+                        tiles[tile_idx] = tile
+
+                if use_hgt:
+                    # ✅ Use preloaded elevation data, do not reload per grid cell
+                    row = max(0, min(3600, int((7.0 - lat_e7 * 1.0e-7) * 3600)))
+                    col = max(0, min(3600, int((lon_e7 * 1.0e-7 + 60.0) * 3600)))
+                    altitude = elevation_data[row, col]
                 else:
-                    altitude = tiles[tile_idx].getAltitudeFromLatLon(lat_e7*1.0e-7, lon_e7*1.0e-7)
-                    grid.fill(gx, gy, altitude)
+                    altitude = tiles[tile_idx].getAltitudeFromLatLon(lat_e7 * 1.0e-7, lon_e7 * 1.0e-7) if not isinstance(tiles[tile_idx], srtm.SRTMOceanTile) else 0
+
+                grid.fill(gx, gy, altitude)
+
         dfile.write(grid)
 
     dfile.finalise()
     return True
 
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Create terrain data')
+    parser.add_argument('--lat', type=float, help='latitude', required=True)
+    parser.add_argument('--lon', type=float, help='longitude', required=True)
+    parser.add_argument('--folder', type=str, help='folder', required=True)
+    parser.add_argument('--spacing', type=int, help='grid spacing', required=True)
+    parser.add_argument('--format', type=str, required=False, default="default", help='Format (not needed for HGT)')
+    parser.add_argument('--use_hgt', action='store_true', help='Use HGT files')
+    args = parser.parse_args()
+    if args.use_hgt:
+        print(f"Creating terrain data for {args.lat}, {args.lon} using HGT files")
+        dlder = None
+    else:
+        print(f"Creating terrain data for {args.lat}, {args.lon}")
+        dlder = srtm.SRTMDownloader()
+    create_degree(dlder, args.lat, args.lon, args.folder, args.spacing, args.format, args.use_hgt)
