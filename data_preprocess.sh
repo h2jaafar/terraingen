@@ -9,6 +9,7 @@ fi
 INPUT_TIF="$1"
 OUTPUT_TIF="output_wgs84.tif"
 RESAMPLED_TIF="aligned_wgs84_30m.tif"
+TERRAIN_FOLDER="$(pwd)"
 
 echo "🔍 Checking Projection of $INPUT_TIF..."
 gdalinfo "$INPUT_TIF" | grep "Coordinate System"
@@ -47,3 +48,12 @@ gdal_translate -of SRTMHGT -a_srs EPSG:4326 -co "SRTMHGT_TYPE=SRTM1" "$RESAMPLED
 
 echo "✅ Conversion Complete! Checking Output:"
 gdalinfo "$HGT_FILE"
+
+# ✅ Extract Latitude & Longitude for `terrain_gen.py`
+LAT=$(echo "$YMIN" | awk '{print int($1)}')
+LON=$(echo "$XMIN" | awk '{print int($1)}')
+
+echo "🚀 Running terrain_gen.py for Lat: $LAT, Lon: $LON..."
+python3 terrain_gen.py --lat "$LAT" --lon "$LON" --folder "$TERRAIN_FOLDER" --spacing 30 --use_hgt
+
+echo "✅ Terrain Generation Complete!"

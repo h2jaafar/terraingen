@@ -224,10 +224,16 @@ class DataFile(object):
 
     def finalise(self):
         '''finalise file after writing'''
-        print("Finalising %s" % self.name)
+        print(f"Finalising {self.name}")
         self.fh.close()
-        #and rename
+
+        if not os.path.exists(self.tmpname):
+            print(f"⚠️ Warning: {self.tmpname} not found. Skipping rename.")
+            print(f"⚠️ Warning: probably already ran please delete the previous outputs and rerun")
+            return  # Prevent error if the file was never created
+        
         os.rename(self.tmpname, self.name)
+
         
     def remove(self):
         self.fh.close()
@@ -282,6 +288,7 @@ class DataFile(object):
         
 def create_degree(downloader, lat, lon, folder, grid_spacing, format, use_hgt=False):
     '''create data file for one degree lat/lon'''
+    print(f"Creating terrain data for {lat}, {lon}")
     lat_int = int(math.floor(lat))
     lon_int = int(math.floor((lon)))
 
@@ -303,7 +310,7 @@ def create_degree(downloader, lat, lon, folder, grid_spacing, format, use_hgt=Fa
     while True:
         blocknum += 1
         (lat_e7, lon_e7) = pos_from_file_offset(lat_int, lon_int, blocknum * IO_BLOCK_SIZE, grid_spacing, format)
-        print("Creating block %u %u" % (lat_e7, lon_e7))
+        # print("Creating block %u %u" % (lat_e7, lon_e7))
 
         if lat_e7 * 1.0e-7 - lat_int >= 1.0:
             break  # ✅ Stop when out of bounds
